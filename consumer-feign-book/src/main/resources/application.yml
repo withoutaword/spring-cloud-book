@@ -1,0 +1,16 @@
+server:
+  port: 7091
+spring:
+  application:
+    name: consumer-feign
+    
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://admin:admin@localhost:8761/eureka  # 注册中心路径 
+    healthcheck:
+      enabled: true 
+  instance:
+    prefer-ip-address: true # 是否显示注册项目ip
+    instance-id: ${spring.application.name}:${spring.application.instance_id:${server.port}}  # 定制显示注册项目status
+ 

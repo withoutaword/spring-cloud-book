@@ -1,0 +1,30 @@
+server:
+  port: 7901
+spring:
+  jpa:
+    generate-ddl: false   # 是否构建ddlsql 
+    show-sql: true    # 打印sql
+    hibernate:
+      ddl-auto: none   # hibernate是否构建ddlsql
+  datasource:
+    platform: h2   # 数据库
+    schema: classpath:schema.sql  # 建表语句
+    data: classpath:data.sql  # 数据添加语句
+  application:
+    name: provide  # eureka 显示的注册项目的名称（大写显示）
+logging:
+  level:
+    root: info   
+    org.hibernate: info
+    org.hibernate.type.descriptor.sql.BasicBinder: trace  # 显示日志参数 
+    org.hibernate.type.descriptor.sql.BasicExtractor: trace # 显示日志参数 
+    com.itmuch: debug
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://admin:admin@localhost:8761/eureka  # 注册中心路径 
+    healthcheck:
+      enabled: true 
+  instance:
+    prefer-ip-address: true # 是否显示注册项目ip
+    instance-id: ${spring.application.name}:${spring.application.instance_id:${server.port}}  # 定制显示注册项目status

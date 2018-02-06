@@ -1,0 +1,14 @@
+security: # 添加认证
+  basic:
+    enabled: true
+  user:
+    name: admin
+    password: admin
+server:
+  port: 8761
+eureka:
+  client:
+    register-with-eureka: false  # 关闭 客户端
+    fetch-registry: false
+    service-url:
+      defaultZooe:  http://admin:admin@localhost:8761/eureka  # 添加 默认注册中心路径（包含认证,和security中的user用户名和密码保存一致）
