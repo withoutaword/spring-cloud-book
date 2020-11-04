@@ -1,0 +1,20 @@
+package com.xthink.version.bean.match;
+
+import com.xthink.version.bean.core.ShuntVersionDomainBO;
+import lombok.Data;
+import lombok.experimental.Accessors;
+
+import java.util.List;
+
+/**
+ * 功能描述
+ *
+ * @author brucewu
+ * @date 2019/12/31
+ **/
+@Data
+@Accessors(chain = true)
+public class ShuntVersionDomainRsp {
+
+    List<ShuntVersionDomainBO> domainBOList;
+}
