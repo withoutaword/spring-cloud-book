@@ -1,0 +1,508 @@
+package com.xthink.version.util.service;
+
+import com.alibaba.fastjson.JSONObject;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.xthink.version.bean.core.ShuntVersionDomainBO;
+import com.xthink.version.bean.match.ShuntVersionDomainReq;
+import com.xthink.version.bean.match.ShuntVersionDomainRsp;
+import com.xthink.version.contstant.RouteConst;
+import com.xthink.version.shunt.ShuntVersionStrategyBaseLogic;
+import com.xthink.version.util.RedisHashUtil;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+
+import javax.annotation.PostConstruct;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 功能描述
+ *
+ * @author brucewu
+ * @date 2020/11/4
+ **/
+@Service
+@Slf4j
+public class VersionServiceUtil {
+
+    @Value("${shunt.version.env}")
+    private String env;
+
+    @Value("${shunt.version.system}")
+    private String thisSystem = "";
+
+    @Autowired
+    ShuntVersionStrategyBaseLogic shuntVersionStrategyBaseLogic;
+
+    /**
+     * 大版本信息
+     */
+    private Map<String, List<ShuntVersionDomainBO>> localDomainInfoCacheMap = new ConcurrentHashMap<>();
+
+    private ScheduledExecutorService pullExcutorService = Executors.newScheduledThreadPool(1);
+
+    private long pullPeriod = 1000 * 60L;
+
+    /**
+     * 白名单缓存信息
+     * key: System_
+     */
+    private Map<String, List<String>> localWhiteListCacheMap = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    public void init() {
+//        // 将信息初始化到缓存
+//        reloadRedisToLocalCache(env);
+//        // 加载白名单到内存缓存
+//        realodRedisWhiteListSchedule(env);
+        // 将信息初始化到缓存
+        reloadRedisToLocalCache(thisSystem, env);
+        // 加载白名单到内存缓存
+        realodRedisWhiteListSchedule(env);
+    }
+
+    private void realodRedisWhiteListSchedule(String env) {
+
+        final String currEnv = env.toUpperCase();
+        pullExcutorService.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    reloadDomainWhiteListToRedisAndLocal(currEnv);
+                } catch (Exception e) {
+                    log.error("【更新白名单】更新配置失败", e);
+                }
+            }
+        }, pullPeriod, pullPeriod, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 1-重新加载redis缓存到本地
+     */
+    private synchronized void reloadRedisToLocalCache(String env) {
+        // 环境都转大写
+        env = env.toUpperCase();
+        // 加载大版本信息
+        reloadDomainInfoToRedisAndLocal(env);
+        // 加载白名单信息
+        reloadDomainWhiteListToRedisAndLocal(env);
+    }
+    /**
+     * 1-重新加载redis缓存到本地
+     */
+    private synchronized void reloadRedisToLocalCache(String thisSystem, String env) {
+        if(StringUtils.isEmpty(thisSystem) || StringUtils.isEmpty(env)){
+            log.error("系统[{}]或环境[{}]信息为空，请检查。", thisSystem, env);
+            return;
+        }
+
+        // 环境都转大写
+        env = env.toUpperCase();
+        // 加载大版本信息
+        reloadDomainInfoToRedisAndLocal(thisSystem, env);
+        // 加载白名单信息
+        reloadDomainWhiteListToRedisAndLocal(env);
+    }
+
+    private void reloadDomainInfoToRedisAndLocal(String env) {
+        //查询redis缓存
+        Map<String, List<ShuntVersionDomainBO>> redisCache = getRedisCache(env);
+        //加载到本地缓存
+        Boolean result = putToLocalCache(redisCache);
+        log.info("刷新本地缓存-出参; result:{}", result);
+    }
+
+    private void reloadDomainInfoToRedisAndLocal(String thisSystem, String env) {
+        //查询redis缓存
+        Map<String, List<ShuntVersionDomainBO>> redisCache = getRedisCache(thisSystem, env);
+        //加载到本地缓存
+        Boolean result = putToLocalCache(redisCache);
+        log.info("刷新本地缓存-出参; result:{}", result);
+    }
+
+    private void reloadDomainWhiteListToRedisAndLocal(String env) {
+        Map<String, List<String>> result = getRedisWhiteListCache(env);
+        localWhiteListCacheMap.putAll(result);
+    }
+
+    /**
+     * 读取缓存，匹配符合条件的版本分流集合
+     */
+    private Map<String, List<ShuntVersionDomainBO>> getRedisCache(final String thisSystem, final String env) {
+
+        Map<String, List<ShuntVersionDomainBO>> allDomainMap = Maps.newHashMap();
+
+        //查缓存
+        final String hashKey = RedisHashUtil.getHashKeyWithDomainInfo(env);
+        JedisProxy master = JedisProxy.getMasterCache(ShuntVersionConst.SHUNT_VERSION_PROXY_V1);
+        // 环境所有值
+        Map<String, String> rawMapByEnv = master.hgetAll(hashKey);
+        log.info("验证日志-缓存返回原始结果,rawMapByEnv:{}", rawMapByEnv);
+
+        List<String> systemList = Arrays.asList(thisSystem.split(","));
+        List<String> domainIdList = new ArrayList<>();
+        List<String> invalidDomainIdList = new ArrayList<>();
+        //解析
+        for (Map.Entry<String, String> entry : rawMapByEnv.entrySet()) {
+            String[] split = entry.getKey().split(":");
+            String system = split[0];
+            if(CollectionUtils.isEmpty(systemList)
+                    || StringUtils.isEmpty(system)){
+                log.error("分流消息的所属系统[{}]为空, 或本系统的对应分流系统信息[{}]为空，请检查。", system, thisSystem);
+                continue;
+            }
+
+            if(!systemList.contains(system)){
+                log.warn("该消息属于系统[{}], 与本系统[{}]不匹配，跳过。", system, thisSystem);
+                continue;
+            }
+
+            // System:Scene
+            String key = split[0] + ":" + split[1];
+            ShuntVersionDomainBO domainBO = JSONObject.parseObject(entry.getValue(), ShuntVersionDomainBO.class);
+            if(!com.fenqile.bigdata.shunt.version.Enum.EnumShuntState.RIGHT_STATE.getCode().equals(domainBO.getState())){
+                log.debug("大版本[{}]的状态是无效，不加载到本地缓存。", domainBO.getDomainId());
+                invalidDomainIdList.add(domainBO.getDomainId());
+                continue;
+            }
+
+            if (allDomainMap.containsKey(key)) {
+                List<ShuntVersionDomainBO> shuntVersionDomainBOS = allDomainMap.get(key);
+                shuntVersionDomainBOS.add(domainBO);
+                allDomainMap.put(key, shuntVersionDomainBOS);
+            } else {
+                allDomainMap.put(key, Lists.newArrayList(domainBO));
+            }
+            domainIdList.add(domainBO.getDomainId());
+
+            if (log.isDebugEnabled()) {
+                log.debug("redis缓存返回-key:{}, value: {}", entry.getKey(), entry.getValue());
+            }
+        }
+
+        int totalNum = 0;
+        for (Map.Entry<String, List<ShuntVersionDomainBO>> stringListEntry : allDomainMap.entrySet()) {
+            int size = stringListEntry.getValue().size();
+            totalNum += size;
+        }
+
+        //返回
+        if (log.isDebugEnabled()) {
+            ObjectMapper objectMapper = new ObjectMapper();
+            String res = null;
+            try {
+                res = objectMapper.writeValueAsString(allDomainMap);
+            } catch (JsonProcessingException e) {
+                e.printStackTrace();
+            }
+            log.debug("redis缓存返回-总数:{}, detail:{},", totalNum, res);
+        }
+
+        log.info("无效的大版本数量为:{}, 版本ID为:{}", allDomainMap.size(), JSONObject.toJSONString(invalidDomainIdList));
+        log.info("有效的大版本数量为:{}, 版本ID为:{}", allDomainMap.size(), JSONObject.toJSONString(domainIdList));
+        return allDomainMap;
+    }
+    /**
+     * 读取缓存，匹配符合条件的版本分流集合
+     */
+    private Map<String, List<ShuntVersionDomainBO>> getRedisCache(final String env) {
+
+        return getRedisCache(thisSystem, env);
+    }
+
+    private Map<String, List<String>> getRedisWhiteListCache(String env) {
+
+        Map<String, List<String>> result = Maps.newHashMap();
+
+        String hashKey = RedisHashUtil.getHashKeyWithWhiteList(env);
+        JedisProxy jedisProxy = JedisProxy.getMasterCache(ShuntVersionConst.SHUNT_VERSION_PROXY_V1);
+
+        Map<String, String> rawMapByEnv = jedisProxy.hgetAll(hashKey);
+        for (Map.Entry<String, String> entry : rawMapByEnv.entrySet()) {
+
+            List<String> whilteList = Lists.newArrayList();
+            whilteList.addAll(Arrays.asList(entry.getValue().split(",")));
+            result.put(entry.getKey(), whilteList);
+
+//            String[] split = entry.getKey().split(":");
+//            String mapKey = split[0] + ":" + split[1];
+
+//            if (result.containsKey(mapKey)) {
+//                List<String> existsLists = result.get(mapKey);
+//                existsLists.addAll(Arrays.asList(entry.getValue().split(",")));
+//                result.put(mapKey, existsLists);
+//            } else {
+//                List<String> whilteList = Lists.newArrayList();
+//                whilteList.addAll(Arrays.asList(entry.getValue().split(",")));
+//                result.put(mapKey, whilteList);
+//            }
+
+        }
+        return result;
+    }
+
+
+    /**
+     * 2-读取缓存，匹配符合条件的版本分流集合
+     */
+    public ShuntVersionDomainRsp getShuntVersion(ShuntVersionDomainReq req) {
+        long startTime = System.currentTimeMillis();
+        ShuntVersionDomainRsp rsp = new ShuntVersionDomainRsp();
+        req.setEnv(req.getEnv().toUpperCase()); // 大写
+
+        //缓存key
+        String hashField = req.getSystem() + ":" + req.getScene();
+        //1.读本地缓存
+        List<ShuntVersionDomainBO> domainBOList = getLocalCacheList(hashField);
+
+        if (log.isDebugEnabled()) {
+            log.debug("getShuntVersion req: {}", JSONObject.toJSONString(req));
+            log.debug("getShuntVersion domainBOList: {}", JSONObject.toJSONString(domainBOList));
+        }
+
+        if (CollectionUtils.isEmpty(domainBOList)) {
+            //查询redis缓存
+            domainBOList = getRedisCacheList(req.getEnv(), hashField);
+            if (CollectionUtils.isEmpty(domainBOList)) {
+                log.error("redis无法找到对应的分流版本号信息，请检查;mapKey:{}", hashField);
+                return null;
+            }
+
+            //更新到本地缓存
+            Boolean res = putToLocalCache(hashField, domainBOList);
+            if (!res) {
+                log.error("更新缓存失败，mapKey:{}, detail:{}", hashField, JSONObject.toJSONString(domainBOList));
+            }
+        }
+
+        log.debug("计算分流-读取缓存耗时:{}", System.currentTimeMillis() - startTime);
+        startTime = System.currentTimeMillis();
+
+        // 白名单过滤
+        List<ShuntVersionDomainBO> domainWhilteList = filterShuntSgyWhiteList(domainBOList, req);
+        if (!CollectionUtils.isEmpty(domainWhilteList)) {
+            return rsp.setDomainBOList(domainWhilteList);
+        }
+
+        log.debug("计算分流-白名单过滤耗时:{}", System.currentTimeMillis() - startTime);
+        startTime = System.currentTimeMillis();
+
+        // 分流计算
+        List<ShuntVersionDomainBO> shuntFilterDomainList = filterShuntSgy(domainBOList, req);
+
+        log.debug("计算分流-分流计算耗时:{}", System.currentTimeMillis() - startTime);
+        // 返回结果
+        return rsp.setDomainBOList(shuntFilterDomainList);
+    }
+
+    /**
+     * 匹配分流
+     */
+    private List<ShuntVersionDomainBO> filterShuntSgy(List<ShuntVersionDomainBO> domainBOList, ShuntVersionDomainReq req) {
+
+        List<ShuntVersionDomainBO> matchDomainList = Lists.newArrayList();
+        List<ShuntVersionDomainBO> defaultDomainList = Lists.newArrayList();
+
+
+        for (ShuntVersionDomainBO domain : domainBOList) {
+
+            // 默认分流
+            if (RouteConst.DEFAULT_ROUTE.equals(domain.getRouteFlag())) {
+                defaultDomainList.add(domain);
+            } else if (RouteConst.MAIN_ROUTE.equals(domain.getRouteFlag())
+                    && isShuntMatch(domain.getShuntStrategy(), domain.getShuntMatch(), req.getUid())) {
+                // 主路 || 命中分流规则
+                matchDomainList.add(domain);
+            } else if (RouteConst.SUB_ROUTE.equals(domain.getRouteFlag())
+                    && isShuntMatch(domain.getShuntStrategy(), domain.getShuntMatch(), req.getUid())) {
+                // 旁支 || 命中分流规则
+                matchDomainList.add(domain);
+            }
+        }
+        // 如果未命中分流逻辑，返回默认分流
+        return CollectionUtils.isEmpty(matchDomainList) ? defaultDomainList : matchDomainList;
+
+    }
+
+
+    /**
+     * 白名单校验
+     */
+    private List<ShuntVersionDomainBO> filterShuntSgyWhiteList(List<ShuntVersionDomainBO> domainBOList, ShuntVersionDomainReq req) {
+
+        List<ShuntVersionDomainBO> matchDomainList = Lists.newArrayList();
+
+        Integer uid = req.getUid();
+//        String system = req.getSystem();
+        String currEnv = req.getEnv();
+
+        Map<String, List<String>> redisCache = getRedisWhiteListCache(currEnv);
+
+        for (ShuntVersionDomainBO bo : domainBOList) {
+            String hashKey = RedisHashUtil.getHashField(bo.getSystem(), bo.getScene(), bo.getDomainId());
+
+            List<String> whiteList = localWhiteListCacheMap.get(hashKey);
+
+            if (!CollectionUtils.isEmpty(whiteList)
+                    && whiteList.contains(String.valueOf(uid))
+                    && com.fenqile.bigdata.shunt.version.Enum.EnumShuntState.RIGHT_STATE.getCode().equals(bo.getState())) {
+                matchDomainList.add(bo);
+            } else {
+                List<String> whiteRedisCache = redisCache.get(hashKey);
+                if (!CollectionUtils.isEmpty(whiteRedisCache)
+                        && whiteRedisCache.contains(String.valueOf(uid))
+                        && com.fenqile.bigdata.shunt.version.Enum.EnumShuntState.RIGHT_STATE.getCode().equals(bo.getState())) {
+                    matchDomainList.add(bo);
+                }
+            }
+        }
+        return matchDomainList;
+    }
+
+    /**
+     * 分流逻辑
+     */
+    private boolean isShuntMatch(String shuntStrategy, String shuntMatch, Integer uid) {
+        return shuntVersionStrategyBaseLogic.isShuntMatch(shuntStrategy, shuntMatch, uid);
+    }
+
+    /**
+     * 3-追加本地缓存
+     */
+    public boolean updateDomainToLocalCache(String domainIdKey, List<ShuntVersionDomainBO> domainBOList) {
+        log.info("更新本地缓存分流-input, detail:{}", JSONObject.toJSONString(domainBOList));
+
+        //更新到本地缓存
+        return putToLocalCache(domainIdKey, domainBOList);
+    }
+
+    /**
+     * 刷新本地缓存
+     */
+    public synchronized boolean refreshLocalCache() {
+        log.info("刷新本地缓存分流-开始");
+
+        return false;
+    }
+
+    private Map<String, List<ShuntVersionDomainBO>> getLocalDomainInfoCacheMap() {
+        return localDomainInfoCacheMap;
+    }
+
+    public List<ShuntVersionDomainBO> getLocalCacheList(String mapKey) {
+        if (log.isDebugEnabled()) {
+            log.debug("getLocalCacheList mapKey: {} localDomainInfoCacheMap: {}",
+                    mapKey,
+                    JSONObject.toJSONString(localDomainInfoCacheMap));
+        }
+        return localDomainInfoCacheMap.get(mapKey);
+    }
+
+    /**
+     * 读取缓存，匹配符合条件的版本分流集合
+     */
+    private List<ShuntVersionDomainBO> getRedisCacheList(String env, String domainIdKey) {
+        final List<ShuntVersionDomainBO> domainBOList = Collections.emptyList();
+        //查缓存
+
+        final String scanWildcard = domainIdKey + "?";
+        final String hashKey = RedisHashUtil.getHashKeyWithDomainInfo(env);
+
+
+//        String hashKey = RedisHashUtil.getHashKeyWithDomainInfo(env);
+//        JedisProxy master = JedisProxy.getMasterCache(ShuntVersionConst.SHUNT_VERSION_PROXY_V1);
+
+//        if (master.hexists(hashKey, domainIdKey)) {
+//            ScanResult<Map.Entry<String, String>> hscan = master.hscan("Search_System_SEARCH_SCENE_00000001_*", 0);
+
+//            String cacheValue = master.hget(hashKey, domainIdKey);
+//            shuntVersionDomainBO = JSONObject.parseObject(cacheValue, ShuntVersionDomainBO.class);
+//            log.debug("redis缓存返回-对应缓存:{},", shuntVersionDomainBO);
+//        }
+
+        JedisProxy.getMasterCache(ShuntVersionConst.SHUNT_VERSION_PROXY_V1).execute(new RedisCommand<Object>() {
+            @Override
+            public Object doExecute(Jedis jedis) {
+                //拿到jedis连接，实现特有的功能
+                ScanParams params = new ScanParams();
+                params.match(scanWildcard);
+                ScanResult<Map.Entry<String, String>> hscan1 = jedis.hscan(hashKey, "0", params);
+                List<Map.Entry<String, String>> result = hscan1.getResult();
+
+
+                for (Map.Entry<String, String> entry : result) {
+//                    String key = entry.getKey();
+                    ShuntVersionDomainBO versionDomainBO = JSONObject.parseObject(entry.getValue(), ShuntVersionDomainBO.class);
+                    domainBOList.add(versionDomainBO);
+                }
+                return domainBOList;
+            }
+        });
+
+        return domainBOList;
+    }
+
+    private synchronized Boolean putToLocalCache(String mapKey, List<ShuntVersionDomainBO> domainBOList) {
+
+        try {
+            localDomainInfoCacheMap.put(mapKey, domainBOList);
+            log.info("更新本地缓存分流-成功。key:{}, detail:{}", mapKey, JSONObject.toJSONString(domainBOList));
+            return true;
+
+        } catch (Exception e) {
+            log.error("更新本地缓存分流-出现异常,key:{}, detail:{}, e:{}", mapKey, JSONObject.toJSONString(domainBOList), e);
+        }
+        return false;
+    }
+
+    private Boolean putToLocalCache(Map<String, List<ShuntVersionDomainBO>> domainMap) {
+        if (CollectionUtils.isEmpty(domainMap)) {
+            log.error("要更新的domainMap为空，请检查,domainMap:{}", domainMap);
+            return false;
+        }
+        localDomainInfoCacheMap.putAll(domainMap);
+        log.info("更新本地缓存分流-成功。总数:{}, detail:{}", domainMap.size(), JSONObject.toJSONString(domainMap));
+        return true;
+    }
+
+
+    public void putMqMessageToLocalCache(JSONObject rawCacheMap, String localEnv) {
+        JSONObject objects = rawCacheMap.getJSONObject(RedisHashUtil.getHashKeyWithDomainInfo(localEnv));
+
+        Map<String, List<ShuntVersionDomainBO>> newMap = new HashMap<>();
+//        Map<String, List<ShuntVersionDomainBO>> allDomainMap = Maps.newHashMap(localDomainInfoCacheMap);
+        for (Map.Entry<String, Object> entry : objects.entrySet()) {
+            String[] split = entry.getKey().split(":");
+            String key = split[0] + ":" + split[1];  // System:Scene
+            ShuntVersionDomainBO domainBO = JSONObject.parseObject(entry.getValue().toString(), ShuntVersionDomainBO.class);
+            if (localDomainInfoCacheMap.containsKey(key)) {
+                List<ShuntVersionDomainBO> shuntVersionDomainBOS = localDomainInfoCacheMap.get(key);
+                if (shuntVersionDomainBOS.contains(domainBO)) {
+                    shuntVersionDomainBOS.set(shuntVersionDomainBOS.indexOf(domainBO), domainBO);
+                } else {
+                    shuntVersionDomainBOS.add(domainBO);
+                }
+                newMap.put(key, shuntVersionDomainBOS);
+            } else {
+                newMap.put(key, Lists.newArrayList(domainBO));
+            }
+
+        }
+
+        for (Map.Entry<String, List<ShuntVersionDomainBO>> entry : newMap.entrySet()) {
+            updateDomainToLocalCache(entry.getKey(), entry.getValue());
+
+        }
+    }
+
+}
