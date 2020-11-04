@@ -1,0 +1,30 @@
+package com.xthink.version.bean.match;
+
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.experimental.Accessors;
+
+/**
+ * 功能描述
+ *
+ * @author brucewu
+ * @date 2019/12/31
+ **/
+@EqualsAndHashCode(callSuper = true)
+@Data
+@Accessors(chain = true)
+public class ShuntVersionDomainReq extends BaseShuntVersion {
+
+    /**
+     * 用户ID
+     */
+    private Integer uid;
+
+    /**
+     * 环境
+     * pre/gray/prod/oa
+     */
+    private String env;
+
+    private String domainId;
+}
