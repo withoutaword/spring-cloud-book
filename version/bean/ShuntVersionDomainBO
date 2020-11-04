@@ -1,0 +1,76 @@
+package com.xthink.version.bean.core;
+
+import com.alibaba.fastjson.annotation.JSONField;
+import com.google.common.base.Objects;
+import lombok.Data;
+
+import java.util.Date;
+import java.util.List;
+
+/**
+ * 分流域
+ * @author brucewu
+ * @date 2020-01-03
+ */
+@Data
+public class ShuntVersionDomainBO extends ShuntDomainBaseBO{
+//    private Integer index;
+
+    private String domainName;
+
+    /**
+     * 状态，0-有效，1-无效
+     */
+    private Byte state;
+
+    private String desc;
+
+    private String shuntStrategy;
+
+    private String shuntMatch;
+
+    /**
+     * 主旁标识，0-默认, 1-主干，2-旁路
+     */
+    private Byte routeFlag;
+
+    private Byte envFlag;
+
+    private String reportLink;
+
+    private String createOperator;
+
+    @JSONField(format = "yyyy-MM-dd HH:mm:ss")
+    private Date createTime;
+
+    private String modifyOperator;
+
+    @JSONField(format = "yyyy-MM-dd HH:mm:ss")
+    private Date modifyTime;
+
+    private Integer version;
+
+    List<ShuntDomainLayerBO> shuntDomainLayerBOList;
+
+    // 操作者
+    private String operator;
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        if (!super.equals(o)) return false;
+        ShuntVersionDomainBO that = (ShuntVersionDomainBO) o;
+        return Objects.equal(getDomainId(), that.getDomainId()) &&
+                Objects.equal(getSystem(), that.getSystem()) &&
+                Objects.equal(getScene(), that.getScene()) &&
+                Objects.equal(getEnv(), that.getEnv());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(getDomainId(), getSystem(), getScene(), getEnv());
+    }
+
+
+}
