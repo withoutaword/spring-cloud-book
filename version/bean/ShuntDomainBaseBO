@@ -1,0 +1,22 @@
+package com.xthink.version.bean.core;
+
+import lombok.Data;
+
+/**
+ * 分流域基础Bean
+ * @author brucewu
+ * @date 2020-01-03
+ */
+@Data
+public class ShuntDomainBaseBO {
+
+    private String env;
+
+    private String domainId;
+
+    private String parentDomainId;
+
+    private String system;
+
+    private String scene;
+}
