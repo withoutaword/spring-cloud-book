@@ -1,0 +1,25 @@
+package com.xthink.version.bean.match;
+
+import lombok.Data;
+import lombok.experimental.Accessors;
+
+/**
+ * 功能描述
+ *
+ * @author brucewu
+ * @date 2019/12/31
+ **/
+@Data
+@Accessors(chain = true)
+public class BaseShuntVersion {
+
+    /**
+     * 系统ID
+     */
+    String system;
+
+    /**
+     * 场景ID
+     */
+    String scene;
+}
